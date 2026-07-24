@@ -1,0 +1,66 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: skillsphere
+      POSTGRES_PASSWORD: skillsphere
+      POSTGRES_DB: skillsphere
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skillsphere -d skillsphere"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      RUN_MIGRATIONS: "true"
+      DATABASE_URL: postgresql://skillsphere:skillsphere@db:5432/skillsphere?schema=public
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["node", "dist/index.js"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  indexer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://skillsphere:skillsphere@db:5432/skillsphere?schema=public
+      INDEXER_INTERVAL_MS: "5000"
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    command: ["node", "dist/indexer.js"]
+
+volumes:
+  postgres_data:

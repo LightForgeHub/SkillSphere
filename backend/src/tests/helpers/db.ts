@@ -2,7 +2,6 @@ import { PrismaClient } from "@prisma/client";
 import { execSync } from "child_process";
 import path from "path";
 import fs from "fs";
-import os from "os";
 
 // Resolve the backend root directory robustly regardless of __dirname value
 // Walk up from this file's location until we find package.json
@@ -21,9 +20,12 @@ function findBackendRoot(startDir: string): string {
 
 const BACKEND_ROOT = findBackendRoot(__dirname);
 
+const DEFAULT_DATABASE_URL =
+  "postgresql://skillsphere:skillsphere@localhost:5432/skillsphere?schema=public";
+
 /**
- * Creates an isolated SQLite database for a test suite.
- * Each suite gets its own file so tests don't interfere with each other.
+ * Creates an isolated PostgreSQL schema for a test suite.
+ * Each suite gets its own schema so tests don't interfere with each other.
  */
 export function createTestDatabase(): {
   prisma: PrismaClient;
@@ -32,11 +34,11 @@ export function createTestDatabase(): {
   teardown: () => Promise<void>;
   clearAll: () => Promise<void>;
 } {
-  const dbPath = path.join(
-    os.tmpdir(),
-    `skillsphere-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`
-  );
-  const databaseUrl = `file:${dbPath}`;
+  const baseUrl = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
+  const schema = `test_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  const url = new URL(baseUrl);
+  url.searchParams.set("schema", schema);
+  const databaseUrl = url.toString();
 
   const prisma = new PrismaClient({
     datasources: { db: { url: databaseUrl } },
@@ -44,7 +46,6 @@ export function createTestDatabase(): {
   });
 
   const setup = async () => {
-    // Push the Prisma schema to the isolated SQLite test database
     execSync(
       `npx prisma db push --skip-generate --accept-data-loss --schema="${path.join(BACKEND_ROOT, "prisma", "schema.prisma")}"`,
       {
@@ -58,12 +59,12 @@ export function createTestDatabase(): {
   };
 
   const teardown = async () => {
-    await prisma.$disconnect();
-    // Clean up the SQLite file and WAL/SHM sidecar files
-    for (const suffix of ["", "-wal", "-shm"]) {
-      const p = `${dbPath}${suffix}`;
-      if (fs.existsSync(p)) fs.unlinkSync(p);
+    try {
+      await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    } catch {
+      // Schema may not exist if setup failed
     }
+    await prisma.$disconnect();
   };
 
   const clearAll = async () => {
@@ -73,7 +74,7 @@ export function createTestDatabase(): {
     await prisma.user.deleteMany();
   };
 
-  return { prisma, dbPath, setup, teardown, clearAll };
+  return { prisma, dbPath: schema, setup, teardown, clearAll };
 }
 
 /**
