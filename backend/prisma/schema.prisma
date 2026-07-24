@@ -1,0 +1,45 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(cuid())
+  walletAddress String   @unique
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  expert        Expert?
+}
+
+model Expert {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name          String
+  bio           String   @default("")
+  skills        String   @default("") // comma-separated list
+  hourlyRate    Float    @default(0)
+  isAvailable   Boolean  @default(true)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model EventLog {
+  id            String   @id @default(cuid())
+  txHash        String   @unique
+  eventType     String   // e.g. "SESSION_BOOKED", "SESSION_COMPLETED", "PAYMENT_RELEASED"
+  payload       String   // JSON string
+  processed     Boolean  @default(false)
+  processedAt   DateTime?
+  createdAt     DateTime @default(now())
+}
