@@ -1,10 +1,21 @@
 import { PrismaClient } from "@prisma/client";
+import {
+  publishSessionStatus,
+  SessionStatusEventType,
+} from "./sessionEvents";
 
 export type StellarEventType =
   | "SESSION_BOOKED"
   | "SESSION_COMPLETED"
   | "PAYMENT_RELEASED"
   | "EXPERT_REGISTERED";
+
+/** Map indexer event types that belong in a session room to WS status types. */
+const SESSION_SCOPED_EVENTS: ReadonlySet<StellarEventType> = new Set([
+  "SESSION_BOOKED",
+  "SESSION_COMPLETED",
+  "PAYMENT_RELEASED",
+]);
 
 export interface StellarEvent {
   txHash: string;
@@ -71,7 +82,11 @@ export async function processEvents(
         continue;
       }
 
-      await handleEvent(prisma, log.eventType as StellarEventType, payload);
+      const eventType = log.eventType as StellarEventType;
+      await handleEvent(prisma, eventType, payload);
+
+      // Push immediate status updates to any clients in session:${sessionId}.
+      maybeBroadcastSessionStatus(eventType, payload);
 
       await prisma.eventLog.update({
         where: { id: log.id },
@@ -164,4 +179,24 @@ async function handlePaymentReleased(
   // Future: record payment transaction
   if (!payload["amount"]) throw new Error("PAYMENT_RELEASED: missing amount");
   // No-op for now
+}
+
+/**
+ * If the indexer payload includes a sessionId, fan out to the session room.
+ * Producers without a sessionId (e.g. early SESSION_BOOKED stubs) are skipped.
+ */
+function maybeBroadcastSessionStatus(
+  eventType: StellarEventType,
+  payload: Record<string, unknown>
+): void {
+  if (!SESSION_SCOPED_EVENTS.has(eventType)) return;
+
+  const sessionId = payload["sessionId"];
+  if (typeof sessionId !== "string" || !sessionId) return;
+
+  publishSessionStatus(
+    eventType as SessionStatusEventType,
+    sessionId,
+    payload
+  );
 }
