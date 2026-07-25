@@ -19,6 +19,10 @@ export async function createApp(prismaClient: PrismaClient) {
 
   await server.start();
 
+  app.get("/health", (_req, res) => {
+    res.status(200).json({ status: "ok" });
+  });
+
   app.use(
     "/graphql",
     cors<cors.CorsRequest>(),

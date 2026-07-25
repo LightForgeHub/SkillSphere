@@ -6,11 +6,14 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "start:indexer": "node dist/indexer.js",
     "dev": "ts-node src/index.ts",
+    "dev:indexer": "ts-node src/indexer.ts",
     "test": "jest --coverage",
     "test:watch": "jest --watch",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev"
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy"
   },
   "dependencies": {
     "@apollo/server": "4.11.3",
@@ -23,6 +26,7 @@
     "graphql-tag": "2.12.6",
     "socket.io": "4.8.3",
     "tweetnacl": "1.0.3"
+    "prisma": "5.22.0"
   },
   "devDependencies": {
     "@types/bs58": "4.0.4",
@@ -36,6 +40,8 @@
     "socket.io-client": "4.8.3",
     "supertest": "7.0.0",
     "ts-jest": "29.2.5",
+    "ts-jest": "29.2.5",
+    "supertest": "7.0.0",
     "ts-node": "10.9.2",
     "typescript": "5.7.2"
   }

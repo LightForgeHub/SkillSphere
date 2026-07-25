@@ -1,0 +1,14 @@
+node_modules
+dist
+coverage
+.git
+.gitignore
+*.md
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+src/tests
+jest.config.ts
+tsconfig.test.json
