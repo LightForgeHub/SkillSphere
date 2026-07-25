@@ -12,6 +12,7 @@ const config: Config = {
   collectCoverageFrom: [
     "src/**/*.ts",
     "!src/index.ts",
+    "!src/indexer.ts",
     "!src/prisma.ts",
     "!src/tests/**",
     "!src/**/*.d.ts",
