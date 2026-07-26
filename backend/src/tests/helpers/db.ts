@@ -69,6 +69,7 @@ export function createTestDatabase(): {
 
   const clearAll = async () => {
     // Delete in dependency order (children before parents)
+    await prisma.session.deleteMany();
     await prisma.eventLog.deleteMany();
     await prisma.expert.deleteMany();
     await prisma.user.deleteMany();
@@ -109,4 +110,32 @@ export async function seedExpert(
   });
 
   return { user, expert };
+}
+
+/**
+ * Seed an active (or inactive) Session record.
+ */
+export async function seedSession(
+  prisma: PrismaClient,
+  overrides: Partial<{ isActive: boolean }> = {}
+) {
+  return prisma.session.create({
+    data: { isActive: overrides.isActive ?? true },
+  });
+}
+
+/**
+ * Set the lastHeartbeat on an existing Expert row.
+ * Pass an offsetMs value (negative = in the past, e.g. -60_000 = 1 min ago).
+ */
+export async function seedHeartbeat(
+  prisma: PrismaClient,
+  expertId: string,
+  offsetMs: number = 0
+) {
+  const lastHeartbeat = new Date(Date.now() + offsetMs);
+  return prisma.expert.update({
+    where: { id: expertId },
+    data: { lastHeartbeat },
+  });
 }

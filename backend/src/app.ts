@@ -8,6 +8,7 @@ import { typeDefs } from "./schema";
 import { resolvers } from "./resolvers";
 import { GraphQLContext } from "./context";
 import { extractAuthFromHeaders, verifyWalletSignature } from "./auth";
+import { createSurgeMultiplierRouter } from "./surgeMultiplier";
 
 export async function createApp(prismaClient: PrismaClient) {
   const app = express();
@@ -22,6 +23,8 @@ export async function createApp(prismaClient: PrismaClient) {
   app.get("/health", (_req, res) => {
     res.status(200).json({ status: "ok" });
   });
+
+  app.use("/api/surge-multiplier", createSurgeMultiplierRouter(prismaClient));
 
   app.use(
     "/graphql",
