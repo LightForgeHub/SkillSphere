@@ -20,18 +20,26 @@ model User {
 }
 
 model Expert {
-  id            String   @id @default(cuid())
-  userId        String   @unique
-  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id             String    @id @default(cuid())
+  userId         String    @unique
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  name          String
-  bio           String   @default("")
-  skills        String   @default("") // comma-separated list
-  hourlyRate    Float    @default(0)
-  isAvailable   Boolean  @default(true)
+  name           String
+  bio            String    @default("")
+  skills         String    @default("") // comma-separated list
+  hourlyRate     Float     @default(0)
+  isAvailable    Boolean   @default(true)
+  lastHeartbeat  DateTime?
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model EventLog {

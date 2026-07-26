@@ -26,7 +26,6 @@
     "graphql-tag": "2.12.6",
     "socket.io": "4.8.3",
     "tweetnacl": "1.0.3"
-    "prisma": "5.22.0"
   },
   "devDependencies": {
     "@types/bs58": "4.0.4",
@@ -40,8 +39,6 @@
     "socket.io-client": "4.8.3",
     "supertest": "7.0.0",
     "ts-jest": "29.2.5",
-    "ts-jest": "29.2.5",
-    "supertest": "7.0.0",
     "ts-node": "10.9.2",
     "typescript": "5.7.2"
   }
