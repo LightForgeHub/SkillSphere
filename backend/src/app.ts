@@ -9,6 +9,7 @@ import { resolvers } from "./resolvers";
 import { GraphQLContext } from "./context";
 import { extractAuthFromHeaders, verifyWalletSignature } from "./auth";
 import { createSurgeMultiplierRouter } from "./surgeMultiplier";
+import { walletAuthMiddleware } from "./middleware/walletAuth";
 
 export async function createApp(prismaClient: PrismaClient) {
   const app = express();
@@ -30,6 +31,7 @@ export async function createApp(prismaClient: PrismaClient) {
     "/graphql",
     cors<cors.CorsRequest>(),
     json(),
+    walletAuthMiddleware,
     expressMiddleware(server, {
       context: async ({ req }) => {
         const authPayload = extractAuthFromHeaders(

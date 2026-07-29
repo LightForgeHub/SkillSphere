@@ -6,6 +6,9 @@ const config: Config = {
   rootDir: ".",
   testMatch: ["**/src/**/*.test.ts"],
   moduleFileExtensions: ["ts", "js", "json"],
+  moduleNameMapper: {
+    "^@stellar/stellar-sdk$": "<rootDir>/__mocks__/@stellar/stellar-sdk.js",
+  },
   transform: {
     "^.+\\.ts$": ["ts-jest", { tsconfig: "tsconfig.test.json" }],
   },
