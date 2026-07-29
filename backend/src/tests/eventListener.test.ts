@@ -1,5 +1,9 @@
 import { createTestDatabase } from "./helpers/db";
 import { ingestEvent, processEvents, StellarEvent } from "../eventListener";
+import {
+  NotificationService,
+  setNotificationService,
+} from "../notificationService";
 
 const db = createTestDatabase();
 let dbAvailable = false;
@@ -23,6 +27,11 @@ beforeEach(async () => {
   if (dbAvailable) {
     await db.clearAll();
   }
+  setNotificationService(null);
+});
+
+afterEach(() => {
+  setNotificationService(null);
 });
 
 describe("ingestEvent", () => {
@@ -161,6 +170,27 @@ describe("processEvents", () => {
 
   it("processes a SESSION_REFUNDED event and updates status to REFUNDED", async () => {
     if (!dbAvailable) return;
+
+    const seeker = "GSEEKER_REFUND_TEST";
+    const expertWallet = "GEXPERT_REFUND_TEST";
+    await db.prisma.user.create({ data: { walletAddress: seeker } });
+    const expertUser = await db.prisma.user.create({
+      data: { walletAddress: expertWallet },
+    });
+    const expert = await db.prisma.expert.create({
+      data: { userId: expertUser.id, name: "Refund Expert" },
+    });
+    await db.prisma.session.create({
+      data: {
+        sessionId: "sess_refund_abc",
+        seekerAddress: seeker,
+        expertAddress: expertWallet,
+        expertId: expert.id,
+        status: "ACTIVE",
+        escrowAmount: 100n,
+      },
+    });
+
     await ingestEvent(db.prisma, {
       txHash: "tx_session_refunded_001",
       eventType: "SESSION_REFUNDED",
@@ -170,6 +200,11 @@ describe("processEvents", () => {
     const result = await processEvents(db.prisma);
     expect(result.processed).toBe(1);
     expect(result.errors).toHaveLength(0);
+
+    const session = await db.prisma.session.findUnique({
+      where: { sessionId: "sess_refund_abc" },
+    });
+    expect(session?.status).toBe("REFUNDED");
   });
 
   it("processes a PAYMENT_RELEASED event without error", async () => {
@@ -380,5 +415,177 @@ describe("processEvents", () => {
     const result = await processEvents(db.prisma);
     expect(result.skipped).toBe(1);
     expect(result.errors[0]).toMatch(/missing amount/i);
+  });
+
+  it("notifies Discord/Telegram when a new SESSION_BOOKED session is created", async () => {
+    if (!dbAvailable) return;
+
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
+      calls.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body ?? "{}")),
+      });
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+
+    setNotificationService(
+      new NotificationService({
+        discordWebhookUrl: "https://discord.example/hook",
+        telegramWebhookUrl: "https://api.telegram.org/botT/sendMessage",
+        telegramChatId: "42",
+        fetchImpl,
+      })
+    );
+
+    const seeker = "GSEEKER_NOTIFY_TEST_WALLET";
+    const expertWallet = "GEXPERT_NOTIFY_TEST_WALLET";
+    const expertUser = await db.prisma.user.create({
+      data: { walletAddress: expertWallet },
+    });
+    const expert = await db.prisma.expert.create({
+      data: {
+        userId: expertUser.id,
+        name: "Notify Expert",
+        hourlyRate: 50,
+      },
+    });
+
+    await ingestEvent(db.prisma, {
+      txHash: "tx_notify_booked_001",
+      eventType: "SESSION_BOOKED",
+      payload: {
+        sessionId: "sess_notify_001",
+        expertId: expert.id,
+        seekerAddress: seeker,
+        expertAddress: expertWallet,
+        amount: "10000000",
+      },
+    });
+
+    const result = await processEvents(db.prisma);
+    expect(result.processed).toBe(1);
+    expect(result.errors).toHaveLength(0);
+
+    const session = await db.prisma.session.findUnique({
+      where: { sessionId: "sess_notify_001" },
+    });
+    expect(session).not.toBeNull();
+
+    // Allow fire-and-forget notifyBookingAsync to flush.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    const discord = calls.find((c) => c.url.includes("discord"));
+    expect(discord).toBeDefined();
+    expect(JSON.stringify(discord!.body)).toContain("$50/hr");
+    expect(JSON.stringify(discord!.body)).toContain(seeker);
+  });
+
+  it("still processes SESSION_BOOKED when notification webhooks fail", async () => {
+    if (!dbAvailable) return;
+
+    const fetchImpl = (async () => {
+      throw new Error("webhook unreachable");
+    }) as typeof fetch;
+
+    setNotificationService(
+      new NotificationService({
+        discordWebhookUrl: "https://discord.example/hook",
+        fetchImpl,
+        logger: {
+          error: () => undefined,
+          warn: () => undefined,
+          info: () => undefined,
+        },
+      })
+    );
+
+    const seeker = "GSEEKER_NOTIFY_FAIL_WALLET";
+    const expertWallet = "GEXPERT_NOTIFY_FAIL_WALLET";
+    const expertUser = await db.prisma.user.create({
+      data: { walletAddress: expertWallet },
+    });
+    const expert = await db.prisma.expert.create({
+      data: { userId: expertUser.id, name: "Fail Expert", hourlyRate: 25 },
+    });
+
+    await ingestEvent(db.prisma, {
+      txHash: "tx_notify_fail_001",
+      eventType: "SESSION_BOOKED",
+      payload: {
+        sessionId: "sess_notify_fail_001",
+        expertId: expert.id,
+        seekerAddress: seeker,
+        expertAddress: expertWallet,
+        amount: "5000000",
+      },
+    });
+
+    const result = await processEvents(db.prisma);
+    expect(result.processed).toBe(1);
+    expect(result.errors).toHaveLength(0);
+
+    const session = await db.prisma.session.findUnique({
+      where: { sessionId: "sess_notify_fail_001" },
+    });
+    expect(session?.status).toBe("ACTIVE");
+  });
+
+  it("does not re-notify when SESSION_BOOKED upserts an existing session", async () => {
+    if (!dbAvailable) return;
+
+    let callCount = 0;
+    const fetchImpl = (async () => {
+      callCount += 1;
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+
+    setNotificationService(
+      new NotificationService({
+        discordWebhookUrl: "https://discord.example/hook",
+        fetchImpl,
+      })
+    );
+
+    const seeker = "GSEEKER_NOTIFY_IDEMP_WALLET";
+    const expertWallet = "GEXPERT_NOTIFY_IDEMP_WALLET";
+    const expertUser = await db.prisma.user.create({
+      data: { walletAddress: expertWallet },
+    });
+    const expert = await db.prisma.expert.create({
+      data: { userId: expertUser.id, name: "Idemp Expert", hourlyRate: 40 },
+    });
+
+    const payload = {
+      sessionId: "sess_notify_idemp_001",
+      expertId: expert.id,
+      seekerAddress: seeker,
+      expertAddress: expertWallet,
+      amount: "10000000",
+    };
+
+    await ingestEvent(db.prisma, {
+      txHash: "tx_notify_idemp_1",
+      eventType: "SESSION_BOOKED",
+      payload,
+    });
+    await processEvents(db.prisma);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const afterFirst = callCount;
+
+    await ingestEvent(db.prisma, {
+      txHash: "tx_notify_idemp_2",
+      eventType: "SESSION_BOOKED",
+      payload: { ...payload, amount: "20000000" },
+    });
+    await processEvents(db.prisma);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(afterFirst).toBeGreaterThan(0);
+    expect(callCount).toBe(afterFirst);
   });
 });

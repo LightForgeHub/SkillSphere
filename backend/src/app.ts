@@ -9,7 +9,6 @@ import { resolvers } from "./resolvers";
 import { GraphQLContext } from "./context";
 import { extractAuthFromHeaders, verifyWalletSignature } from "./auth";
 import { createSurgeMultiplierRouter } from "./surgeMultiplier";
-import { walletAuthMiddleware } from "./middleware/walletAuth";
 
 export async function createApp(prismaClient: PrismaClient) {
   const app = express();
@@ -27,11 +26,11 @@ export async function createApp(prismaClient: PrismaClient) {
 
   app.use("/api/surge-multiplier", createSurgeMultiplierRouter(prismaClient));
 
+  // Wallet auth is optional on GraphQL via context; use walletAuthMiddleware on REST routes that require it.
   app.use(
     "/graphql",
     cors<cors.CorsRequest>(),
     json(),
-    walletAuthMiddleware,
     expressMiddleware(server, {
       context: async ({ req }) => {
         const authPayload = extractAuthFromHeaders(
