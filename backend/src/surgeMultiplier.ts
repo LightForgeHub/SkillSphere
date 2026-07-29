@@ -92,7 +92,7 @@ export function createSurgeMultiplierRouter(
     const heartbeatCutoff = new Date(now - HEARTBEAT_WINDOW_MS);
 
     const [activeSessions, availableExperts] = await Promise.all([
-      prisma.session.count({ where: { isActive: true } }),
+      prisma.session.count({ where: { status: "ACTIVE" } }),
       prisma.expert.count({
         where: { lastHeartbeat: { gte: heartbeatCutoff } },
       }),

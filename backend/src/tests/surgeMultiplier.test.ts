@@ -165,10 +165,10 @@ describe("GET /api/surge-multiplier", () => {
     expect(res.body.availableExperts).toBe(1);
   });
 
-  it("counts only active sessions (isActive=true)", async () => {
-    await seedSession(db.prisma, { isActive: true });
-    await seedSession(db.prisma, { isActive: true });
-    await seedSession(db.prisma, { isActive: false }); // should not count
+  it("counts only active sessions (status=ACTIVE)", async () => {
+    await seedSession(db.prisma, { status: "ACTIVE" });
+    await seedSession(db.prisma, { status: "ACTIVE" });
+    await seedSession(db.prisma, { status: "COMPLETED" }); // should not count
 
     const res = await request(app).get("/api/surge-multiplier");
     expect(res.status).toBe(200);

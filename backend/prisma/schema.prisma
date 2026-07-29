@@ -1,5 +1,5 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// SkillSphere — Prisma schema for off-chain data
+// PostgreSQL via connection pooling (see DATABASE_URL in .env)
 
 generator client {
   provider = "prisma-client-js"
@@ -7,47 +7,186 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  // DATABASE_URL may include pgbouncer query-string params for external poolers.
+  // Prisma's built-in pool is controlled via the PrismaClient constructor options
+  // in src/prisma.ts (connection_limit, pool_timeout, connect_timeout).
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id            String   @id @default(cuid())
-  walletAddress String   @unique
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
 
-  expert        Expert?
+enum SessionStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  REFUNDED
 }
+
+enum TransactionType {
+  ESCROW_FUNDED    // Seeker funded the escrow
+  PAYMENT_RELEASED // Expert received payment after session
+  REFUND_ISSUED    // Seeker received a refund
+  FEE_COLLECTED    // Platform fee deducted
+}
+
+// ---------------------------------------------------------------------------
+// User — one wallet address, owns an optional Expert profile
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  walletAddress String    @unique
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  expert         Expert?
+  seekerSessions Session[] @relation("SeekerSessions")
+  reviews        Review[]  @relation("SeekerReviews")
+}
+
+// ---------------------------------------------------------------------------
+// Expert — extended profile linked to a User
+// ---------------------------------------------------------------------------
 
 model Expert {
   id             String    @id @default(cuid())
   userId         String    @unique
   user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  /// Display name
   name           String
+  /// Short biography / professional summary
   bio            String    @default("")
-  skills         String    @default("") // comma-separated list
+  /// Comma-separated skill keywords (e.g. "Solidity,DeFi,Rust")
+  skills         String    @default("")
+  /// Broad category tags stored as a native Postgres text array
+  categories     String[]  @default([])
+  /// Hourly rate in XLM (or platform token)
   hourlyRate     Float     @default(0)
+  /// Cached average rating [0.0 – 5.0], updated on each new Review
+  rating         Float     @default(0)
+  /// Number of reviews that contribute to `rating`
+  reviewCount    Int       @default(0)
   isAvailable    Boolean   @default(true)
+  /// Timestamp of last WebSocket heartbeat — used for live availability
   lastHeartbeat  DateTime?
 
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
+
+  sessions Session[] @relation("ExpertSessions")
+  reviews  Review[]  @relation("ExpertReviews")
 }
+
+// ---------------------------------------------------------------------------
+// Session — mirrors the on-chain session record; UUID matches smart-contract ID
+// ---------------------------------------------------------------------------
 
 model Session {
-  id        String   @id @default(cuid())
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  /// On-chain UUID — primary key matches the contract's session identifier
+  sessionId     String        @id @default(uuid())
+
+  /// Seeker's Stellar wallet address (G...)
+  seekerAddress String
+  /// Expert's Stellar wallet address (G...) — stored for on-chain reference
+  expertAddress String
+  /// FK to the Expert row in this database
+  expertId      String
+
+  status        SessionStatus @default(ACTIVE)
+
+  /// Escrowed amount in stroops (1 XLM = 10,000,000 stroops)
+  escrowAmount  BigInt        @default(0)
+
+  startTime     DateTime?
+  endTime       DateTime?
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  // Relations
+  seeker       User    @relation("SeekerSessions", fields: [seekerAddress], references: [walletAddress])
+  expert       Expert  @relation("ExpertSessions", fields: [expertId],      references: [id])
+
+  review       Review?
+  transactions Transaction[]
+
+  @@index([seekerAddress])
+  @@index([expertId])
+  @@index([expertAddress])
+  @@index([status])
 }
 
+// ---------------------------------------------------------------------------
+// Review — one review per completed session
+// ---------------------------------------------------------------------------
+
+model Review {
+  id      String @id @default(cuid())
+
+  /// Rating 1–5
+  rating  Int
+  /// Free-text review body
+  content String @default("")
+
+  /// One review per session (1:1)
+  sessionId String  @unique
+  session   Session @relation(fields: [sessionId], references: [sessionId], onDelete: Cascade)
+
+  /// Denormalised for quick filtering without joins
+  seekerAddress String
+  expertId      String
+
+  seeker User   @relation("SeekerReviews", fields: [seekerAddress], references: [walletAddress])
+  expert Expert @relation("ExpertReviews", fields: [expertId],      references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([expertId])
+  @@index([seekerAddress])
+}
+
+// ---------------------------------------------------------------------------
+// Transaction — Stellar ledger transaction cache
+// ---------------------------------------------------------------------------
+
+model Transaction {
+  id        String @id @default(cuid())
+  /// Stellar transaction hash
+  txHash    String @unique
+
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [sessionId])
+
+  /// Amount in stroops
+  amount    BigInt
+  type      TransactionType
+  /// Timestamp from the Stellar ledger (close time of the ledger)
+  ledgerTime DateTime
+
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([txHash])
+}
+
+// ---------------------------------------------------------------------------
+// EventLog — raw on-chain events ingested by the indexer
+// ---------------------------------------------------------------------------
+
 model EventLog {
-  id            String   @id @default(cuid())
-  txHash        String   @unique
-  eventType     String   // e.g. "SESSION_BOOKED", "SESSION_COMPLETED", "PAYMENT_RELEASED"
-  payload       String   // JSON string
-  processed     Boolean  @default(false)
-  processedAt   DateTime?
-  createdAt     DateTime @default(now())
+  id          String    @id @default(cuid())
+  txHash      String    @unique
+  /// e.g. "SESSION_BOOKED", "SESSION_COMPLETED", "PAYMENT_RELEASED"
+  eventType   String
+  /// JSON-encoded event payload
+  payload     String
+  processed   Boolean   @default(false)
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([processed])
+  @@index([eventType])
 }
