@@ -8,13 +8,17 @@ export type StellarEventType =
   | "SESSION_BOOKED"
   | "SESSION_COMPLETED"
   | "PAYMENT_RELEASED"
-  | "EXPERT_REGISTERED";
+  | "EXPERT_REGISTERED"
+  | "SESSION_PAUSED"
+  | "SESSION_REFUNDED";
 
 /** Map indexer event types that belong in a session room to WS status types. */
 const SESSION_SCOPED_EVENTS: ReadonlySet<StellarEventType> = new Set([
   "SESSION_BOOKED",
   "SESSION_COMPLETED",
   "PAYMENT_RELEASED",
+  "SESSION_PAUSED",
+  "SESSION_REFUNDED",
 ]);
 
 export interface StellarEvent {
@@ -83,7 +87,7 @@ export async function processEvents(
       }
 
       const eventType = log.eventType as StellarEventType;
-      await handleEvent(prisma, eventType, payload);
+      await handleEvent(prisma, eventType, payload, log.txHash);
 
       // Push immediate status updates to any clients in session:${sessionId}.
       maybeBroadcastSessionStatus(eventType, payload);
@@ -110,20 +114,27 @@ export async function processEvents(
 async function handleEvent(
   prisma: PrismaClient,
   eventType: StellarEventType,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  txHash?: string
 ): Promise<void> {
   switch (eventType) {
     case "EXPERT_REGISTERED":
       await handleExpertRegistered(prisma, payload);
       break;
     case "SESSION_BOOKED":
-      await handleSessionBooked(prisma, payload);
+      await handleSessionBooked(prisma, payload, txHash);
       break;
     case "SESSION_COMPLETED":
-      await handleSessionCompleted(prisma, payload);
+      await handleSessionCompleted(prisma, payload, txHash);
       break;
     case "PAYMENT_RELEASED":
-      await handlePaymentReleased(prisma, payload);
+      await handlePaymentReleased(prisma, payload, txHash);
+      break;
+    case "SESSION_PAUSED":
+      await handleSessionPaused(prisma, payload);
+      break;
+    case "SESSION_REFUNDED":
+      await handleSessionRefunded(prisma, payload, txHash);
       break;
     default:
       throw new Error(`Unknown event type: ${eventType}`);
@@ -155,30 +166,196 @@ async function handleExpertRegistered(
 }
 
 async function handleSessionBooked(
-  _prisma: PrismaClient,
-  payload: Record<string, unknown>
+  prisma: PrismaClient,
+  payload: Record<string, unknown>,
+  txHash?: string
 ): Promise<void> {
-  // Future: create a Session record
   if (!payload["expertId"]) throw new Error("SESSION_BOOKED: missing expertId");
-  // No-op for now — recorded in EventLog
+
+  const sessionId = payload["sessionId"] ? String(payload["sessionId"]) : undefined;
+  if (!sessionId) return;
+
+  const seekerAddress = (payload["seekerAddress"] as string) ?? (payload["seeker"] as string) ?? "GSEEKER_DEFAULT";
+  const expertAddress = (payload["expertAddress"] as string) ?? (payload["expert"] as string) ?? "GEXPERT_DEFAULT";
+  const expertId = String(payload["expertId"]);
+
+  // Ensure seeker user exists
+  await prisma.user.upsert({
+    where: { walletAddress: seekerAddress },
+    create: { walletAddress: seekerAddress },
+    update: {},
+  });
+
+  // Ensure expert user & profile exist
+  const expertUser = await prisma.user.upsert({
+    where: { walletAddress: expertAddress },
+    create: { walletAddress: expertAddress },
+    update: {},
+  });
+
+  const existingExpert = await prisma.expert.findUnique({ where: { id: expertId } });
+  let finalExpertId = expertId;
+
+  if (!existingExpert) {
+    const upsertedExpert = await prisma.expert.upsert({
+      where: { userId: expertUser.id },
+      create: {
+        id: expertId,
+        userId: expertUser.id,
+        name: "Indexed Expert",
+      },
+      update: {},
+    });
+    finalExpertId = upsertedExpert.id;
+  }
+
+  const amountStr = payload["amount"] ?? payload["escrowAmount"] ?? "0";
+  const escrowAmount = BigInt(String(amountStr));
+
+  await prisma.session.upsert({
+    where: { sessionId },
+    create: {
+      sessionId,
+      seekerAddress,
+      expertAddress,
+      expertId: finalExpertId,
+      status: "ACTIVE",
+      escrowAmount,
+    },
+    update: {
+      status: "ACTIVE",
+      escrowAmount,
+    },
+  });
+
+  const hash = txHash ?? (payload["txHash"] as string);
+  if (hash) {
+    const ledgerTime = payload["ledgerTime"] ? new Date(payload["ledgerTime"] as string) : new Date();
+    await prisma.transaction.upsert({
+      where: { txHash: hash },
+      create: {
+        txHash: hash,
+        sessionId,
+        amount: escrowAmount,
+        type: "ESCROW_FUNDED",
+        ledgerTime,
+      },
+      update: {},
+    });
+  }
 }
 
 async function handleSessionCompleted(
-  _prisma: PrismaClient,
-  payload: Record<string, unknown>
+  prisma: PrismaClient,
+  payload: Record<string, unknown>,
+  txHash?: string
 ): Promise<void> {
-  // Future: update Session status
   if (!payload["sessionId"]) throw new Error("SESSION_COMPLETED: missing sessionId");
-  // No-op for now
+
+  const sessionId = String(payload["sessionId"]);
+  await prisma.session.updateMany({
+    where: { sessionId },
+    data: { status: "COMPLETED", endTime: new Date() },
+  });
+
+  const hash = txHash ?? (payload["txHash"] as string);
+  const amountStr = payload["amount"] ?? payload["escrowAmount"];
+  if (hash && amountStr !== undefined) {
+    const amount = BigInt(String(amountStr));
+    const ledgerTime = payload["ledgerTime"] ? new Date(payload["ledgerTime"] as string) : new Date();
+    await prisma.transaction.upsert({
+      where: { txHash: hash },
+      create: {
+        txHash: hash,
+        sessionId,
+        amount,
+        type: "PAYMENT_RELEASED",
+        ledgerTime,
+      },
+      update: {},
+    });
+  }
 }
 
 async function handlePaymentReleased(
-  _prisma: PrismaClient,
+  prisma: PrismaClient,
+  payload: Record<string, unknown>,
+  txHash?: string
+): Promise<void> {
+  if (payload["amount"] === undefined || payload["amount"] === null) {
+    throw new Error("PAYMENT_RELEASED: missing amount");
+  }
+
+  const amount = BigInt(String(payload["amount"]));
+  const sessionId = payload["sessionId"] ? String(payload["sessionId"]) : undefined;
+
+  if (sessionId) {
+    await prisma.session.updateMany({
+      where: { sessionId },
+      data: { status: "COMPLETED", endTime: new Date() },
+    });
+  }
+
+  const hash = txHash ?? (payload["txHash"] as string);
+  if (hash && sessionId) {
+    const ledgerTime = payload["ledgerTime"] ? new Date(payload["ledgerTime"] as string) : new Date();
+    await prisma.transaction.upsert({
+      where: { txHash: hash },
+      create: {
+        txHash: hash,
+        sessionId,
+        amount,
+        type: "PAYMENT_RELEASED",
+        ledgerTime,
+      },
+      update: {},
+    });
+  }
+}
+
+async function handleSessionPaused(
+  prisma: PrismaClient,
   payload: Record<string, unknown>
 ): Promise<void> {
-  // Future: record payment transaction
-  if (!payload["amount"]) throw new Error("PAYMENT_RELEASED: missing amount");
-  // No-op for now
+  if (!payload["sessionId"]) throw new Error("SESSION_PAUSED: missing sessionId");
+
+  const sessionId = String(payload["sessionId"]);
+  await prisma.session.updateMany({
+    where: { sessionId },
+    data: { status: "PAUSED" },
+  });
+}
+
+async function handleSessionRefunded(
+  prisma: PrismaClient,
+  payload: Record<string, unknown>,
+  txHash?: string
+): Promise<void> {
+  if (!payload["sessionId"]) throw new Error("SESSION_REFUNDED: missing sessionId");
+
+  const sessionId = String(payload["sessionId"]);
+  await prisma.session.updateMany({
+    where: { sessionId },
+    data: { status: "REFUNDED" },
+  });
+
+  const hash = txHash ?? (payload["txHash"] as string);
+  const amountStr = payload["amount"] ?? payload["escrowAmount"];
+  if (hash && amountStr !== undefined) {
+    const amount = BigInt(String(amountStr));
+    const ledgerTime = payload["ledgerTime"] ? new Date(payload["ledgerTime"] as string) : new Date();
+    await prisma.transaction.upsert({
+      where: { txHash: hash },
+      create: {
+        txHash: hash,
+        sessionId,
+        amount,
+        type: "REFUND_ISSUED",
+        ledgerTime,
+      },
+      update: {},
+    });
+  }
 }
 
 /**
@@ -194,8 +371,13 @@ function maybeBroadcastSessionStatus(
   const sessionId = payload["sessionId"];
   if (typeof sessionId !== "string" || !sessionId) return;
 
+  let wsType: SessionStatusEventType = eventType as SessionStatusEventType;
+  if (eventType === "SESSION_REFUNDED") {
+    wsType = "SESSION_ENDED";
+  }
+
   publishSessionStatus(
-    eventType as SessionStatusEventType,
+    wsType,
     sessionId,
     payload
   );
