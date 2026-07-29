@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import { getNotificationService } from "./notificationService";
 import {
   publishSessionStatus,
   SessionStatusEventType,
@@ -212,6 +213,11 @@ async function handleSessionBooked(
   const amountStr = payload["amount"] ?? payload["escrowAmount"] ?? "0";
   const escrowAmount = BigInt(String(amountStr));
 
+  const existingSession = await prisma.session.findUnique({
+    where: { sessionId },
+  });
+  const isNewSession = !existingSession;
+
   await prisma.session.upsert({
     where: { sessionId },
     create: {
@@ -227,6 +233,21 @@ async function handleSessionBooked(
       escrowAmount,
     },
   });
+
+  // Ping Discord / Telegram only for newly created session rows (fire-and-forget).
+  if (isNewSession) {
+    const expert = await prisma.expert.findUnique({
+      where: { id: finalExpertId },
+    });
+    getNotificationService().notifyBookingAsync({
+      seekerAddress,
+      expertAddress,
+      sessionId,
+      hourlyRate: expert?.hourlyRate,
+      escrowAmount,
+      expertName: expert?.name,
+    });
+  }
 
   const hash = txHash ?? (payload["txHash"] as string);
   if (hash) {

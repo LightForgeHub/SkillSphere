@@ -32,6 +32,8 @@ const config: Config = {
   clearMocks: true,
   resetMocks: false,
   restoreMocks: true,
+  // Isolated schema setup (prisma db push) is slow under parallel load.
+  testTimeout: 60_000,
 };
 
 export default config;
