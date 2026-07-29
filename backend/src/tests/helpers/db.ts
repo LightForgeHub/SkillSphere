@@ -69,6 +69,8 @@ export function createTestDatabase(): {
 
   const clearAll = async () => {
     // Delete in dependency order (children before parents)
+    await prisma.transaction.deleteMany();
+    await prisma.review.deleteMany();
     await prisma.session.deleteMany();
     await prisma.eventLog.deleteMany();
     await prisma.expert.deleteMany();
@@ -113,14 +115,70 @@ export async function seedExpert(
 }
 
 /**
- * Seed an active (or inactive) Session record.
+ * Seed a Session record.
+ * Creates the required seeker User and Expert fixtures automatically unless
+ * explicit addresses / IDs are provided.
+ *
+ * @param overrides.seekerAddress - wallet address for the seeker User
+ * @param overrides.expertAddress - wallet address for the expert User
+ * @param overrides.expertId      - id of an existing Expert row
+ * @param overrides.status        - SessionStatus enum value (default: ACTIVE)
+ * @param overrides.escrowAmount  - escrow in stroops (default: 0)
  */
 export async function seedSession(
   prisma: PrismaClient,
-  overrides: Partial<{ isActive: boolean }> = {}
+  overrides: Partial<{
+    seekerAddress: string;
+    expertAddress: string;
+    expertId: string;
+    status: "ACTIVE" | "PAUSED" | "COMPLETED" | "REFUNDED";
+    escrowAmount: bigint;
+  }> = {}
 ) {
+  // Create a seeker user if no address provided
+  const seekerAddress =
+    overrides.seekerAddress ??
+    `GSEEK${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+  await prisma.user.upsert({
+    where: { walletAddress: seekerAddress },
+    create: { walletAddress: seekerAddress },
+    update: {},
+  });
+
+  // Create an expert user + expert row if no expertId provided
+  let expertId = overrides.expertId;
+  const expertAddress =
+    overrides.expertAddress ??
+    `GEXPR${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+
+  if (!expertId) {
+    const expertUser = await prisma.user.upsert({
+      where: { walletAddress: expertAddress },
+      create: { walletAddress: expertAddress },
+      update: {},
+    });
+    const expert = await prisma.expert.upsert({
+      where: { userId: expertUser.id },
+      create: {
+        userId: expertUser.id,
+        name: "Seeded Expert",
+        bio: "",
+        skills: "",
+        hourlyRate: 0,
+      },
+      update: {},
+    });
+    expertId = expert.id;
+  }
+
   return prisma.session.create({
-    data: { isActive: overrides.isActive ?? true },
+    data: {
+      seekerAddress,
+      expertAddress,
+      expertId,
+      status: overrides.status ?? "ACTIVE",
+      escrowAmount: overrides.escrowAmount ?? 0n,
+    },
   });
 }
 
