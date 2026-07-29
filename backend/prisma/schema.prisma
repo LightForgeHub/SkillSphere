@@ -190,3 +190,14 @@ model EventLog {
   @@index([processed])
   @@index([eventType])
 }
+
+// ---------------------------------------------------------------------------
+// IndexerState — tracks indexer cursor / sequence state across restarts
+// ---------------------------------------------------------------------------
+
+model IndexerState {
+  key        String   @id
+  lastLedger Int      @default(0)
+  updatedAt  DateTime @updatedAt
+}
+

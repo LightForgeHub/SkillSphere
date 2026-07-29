@@ -73,6 +73,7 @@ export function createTestDatabase(): {
     await prisma.review.deleteMany();
     await prisma.session.deleteMany();
     await prisma.eventLog.deleteMany();
+    await prisma.indexerState.deleteMany();
     await prisma.expert.deleteMany();
     await prisma.user.deleteMany();
   };
