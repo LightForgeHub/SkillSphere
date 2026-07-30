@@ -38,7 +38,7 @@ async function gql(
     .set("Content-Type", "application/json");
 }
 
-describe("experts query — pagination", () => {
+describe("experts query — list and filtering", () => {
   let app: Application;
 
   beforeAll(async () => {
@@ -47,31 +47,23 @@ describe("experts query — pagination", () => {
     app = result.app;
   });
 
-  it("returns an empty page when no experts exist", async () => {
+  it("returns an empty list when no experts exist", async () => {
     if (!dbAvailable) return;
     const res = await gql(
       app,
       `query {
         experts {
-          experts { id name }
-          total
-          page
-          pageSize
-          totalPages
+          id name
         }
       }`
     );
 
     expect(res.status).toBe(200);
     expect(res.body.errors).toBeUndefined();
-    const data = res.body.data.experts;
-    expect(data.experts).toHaveLength(0);
-    expect(data.total).toBe(0);
-    expect(data.page).toBe(1);
-    expect(data.totalPages).toBe(0);
+    expect(res.body.data.experts).toHaveLength(0);
   });
 
-  it("returns all experts on a single page", async () => {
+  it("returns all experts without filters", async () => {
     if (!dbAvailable) return;
     await seedExpert(db.prisma, { name: "Alice", skills: "TypeScript,React" });
     await seedExpert(db.prisma, { name: "Bob", skills: "Python,Django" });
@@ -80,32 +72,24 @@ describe("experts query — pagination", () => {
     const res = await gql(
       app,
       `query {
-        experts(page: 1, pageSize: 10) {
-          experts { id name bio skills hourlyRate isAvailable }
-          total
-          page
-          pageSize
-          totalPages
+        experts {
+          id name bio skills hourlyRate isAvailable
         }
       }`
     );
 
     expect(res.status).toBe(200);
     expect(res.body.errors).toBeUndefined();
-    const data = res.body.data.experts;
-    expect(data.total).toBe(3);
-    expect(data.experts).toHaveLength(3);
-    expect(data.page).toBe(1);
-    expect(data.pageSize).toBe(10);
-    expect(data.totalPages).toBe(1);
+    const experts = res.body.data.experts;
+    expect(experts).toHaveLength(3);
 
     // skills should be an array
-    const alice = data.experts.find((e: { name: string }) => e.name === "Alice");
+    const alice = experts.find((e: { name: string }) => e.name === "Alice");
     expect(alice).toBeDefined();
     expect(alice.skills).toEqual(expect.arrayContaining(["TypeScript", "React"]));
   });
 
-  it("paginates correctly across multiple pages", async () => {
+  it("applies limit and offset for pagination", async () => {
     if (!dbAvailable) return;
     for (let i = 1; i <= 5; i++) {
       await seedExpert(db.prisma, { name: `Expert ${i}` });
@@ -113,63 +97,54 @@ describe("experts query — pagination", () => {
 
     const page1 = await gql(
       app,
-      `query ExpertsPage($page: Int, $pageSize: Int) {
-        experts(page: $page, pageSize: $pageSize) {
-          experts { id name }
-          total
-          page
-          totalPages
+      `query ExpertsList($limit: Int, $offset: Int) {
+        experts(limit: $limit, offset: $offset) {
+          id name
         }
       }`,
-      { page: 1, pageSize: 2 }
+      { limit: 2, offset: 0 }
     );
 
     expect(page1.status).toBe(200);
     const d1 = page1.body.data.experts;
-    expect(d1.experts).toHaveLength(2);
-    expect(d1.total).toBe(5);
-    expect(d1.totalPages).toBe(3);
-    expect(d1.page).toBe(1);
+    expect(d1).toHaveLength(2);
 
     const page2 = await gql(
       app,
-      `query ExpertsPage($page: Int, $pageSize: Int) {
-        experts(page: $page, pageSize: $pageSize) {
-          experts { id name }
-          page
+      `query ExpertsList($limit: Int, $offset: Int) {
+        experts(limit: $limit, offset: $offset) {
+          id name
         }
       }`,
-      { page: 2, pageSize: 2 }
+      { limit: 2, offset: 2 }
     );
 
     const d2 = page2.body.data.experts;
-    expect(d2.experts).toHaveLength(2);
-    expect(d2.page).toBe(2);
+    expect(d2).toHaveLength(2);
 
     const page3 = await gql(
       app,
-      `query ExpertsPage($page: Int, $pageSize: Int) {
-        experts(page: $page, pageSize: $pageSize) {
-          experts { id name }
-          page
+      `query ExpertsList($limit: Int, $offset: Int) {
+        experts(limit: $limit, offset: $offset) {
+          id name
         }
       }`,
-      { page: 3, pageSize: 2 }
+      { limit: 2, offset: 4 }
     );
 
     const d3 = page3.body.data.experts;
-    expect(d3.experts).toHaveLength(1);
-    expect(d3.page).toBe(3);
+    expect(d3).toHaveLength(1);
 
+    // All 5 experts appear across the 3 pages
     const allIds = [
-      ...d1.experts.map((e: { id: string }) => e.id),
-      ...d2.experts.map((e: { id: string }) => e.id),
-      ...d3.experts.map((e: { id: string }) => e.id),
+      ...d1.map((e: { id: string }) => e.id),
+      ...d2.map((e: { id: string }) => e.id),
+      ...d3.map((e: { id: string }) => e.id),
     ];
     expect(new Set(allIds).size).toBe(5);
   });
 
-  it("filters experts by skill", async () => {
+  it("filters experts by search term", async () => {
     if (!dbAvailable) return;
     await seedExpert(db.prisma, { name: "Alice", skills: "TypeScript,React" });
     await seedExpert(db.prisma, { name: "Bob", skills: "Python,Django" });
@@ -177,21 +152,46 @@ describe("experts query — pagination", () => {
 
     const res = await gql(
       app,
-      `query ExpertsBySkill($skill: String) {
-        experts(skill: $skill) {
-          experts { name skills }
-          total
+      `query SearchExperts($search: String) {
+        experts(search: $search) {
+          name skills
         }
       }`,
-      { skill: "TypeScript" }
+      { search: "TypeScript" }
     );
 
     expect(res.status).toBe(200);
-    const data = res.body.data.experts;
-    expect(data.total).toBe(2);
+    const experts = res.body.data.experts;
+    expect(experts).toHaveLength(2);
     expect(
-      data.experts.every((e: { skills: string[] }) => e.skills.includes("TypeScript"))
+      experts.every((e: { skills: string[] }) => e.skills.includes("TypeScript"))
     ).toBe(true);
+  });
+
+  it("filters experts by category", async () => {
+    if (!dbAvailable) return;
+    // Create experts; one has "DeFi" in categories
+    const { expert: e1 } = await seedExpert(db.prisma, { name: "DeFi Expert" });
+    await db.prisma.expert.update({
+      where: { id: e1.id },
+      data: { categories: ["DeFi", "Blockchain"] },
+    });
+    await seedExpert(db.prisma, { name: "Web Dev" });
+
+    const res = await gql(
+      app,
+      `query FilterByCategory($category: String) {
+        experts(category: $category) {
+          name
+        }
+      }`,
+      { category: "DeFi" }
+    );
+
+    expect(res.status).toBe(200);
+    const experts = res.body.data.experts;
+    expect(experts).toHaveLength(1);
+    expect(experts[0].name).toBe("DeFi Expert");
   });
 
   it("returns expert details in correct shape", async () => {
@@ -208,13 +208,13 @@ describe("experts query — pagination", () => {
       app,
       `query {
         experts {
-          experts { id name bio skills hourlyRate isAvailable createdAt updatedAt }
+          id name bio skills hourlyRate isAvailable createdAt updatedAt
         }
       }`
     );
 
     expect(res.status).toBe(200);
-    const expert = res.body.data.experts.experts[0];
+    const expert = res.body.data.experts[0];
     expect(expert.name).toBe("DetailExpert");
     expect(expert.bio).toBe("My bio");
     expect(expert.skills).toEqual(expect.arrayContaining(["Go", "Kubernetes"]));
@@ -222,24 +222,5 @@ describe("experts query — pagination", () => {
     expect(expert.isAvailable).toBe(false);
     expect(typeof expert.createdAt).toBe("string");
     expect(typeof expert.updatedAt).toBe("string");
-  });
-
-  it("handles page=0 by clamping to page 1", async () => {
-    if (!dbAvailable) return;
-    await seedExpert(db.prisma);
-
-    const res = await gql(
-      app,
-      `query {
-        experts(page: 0) {
-          page
-          experts { id }
-        }
-      }`
-    );
-
-    expect(res.status).toBe(200);
-    expect(res.body.data.experts.page).toBe(1);
-    expect(res.body.data.experts.experts).toHaveLength(1);
   });
 });

@@ -58,20 +58,8 @@ describe("updateProfile mutation", () => {
   });
 
   const UPDATE_PROFILE = `
-    mutation UpdateProfile(
-      $name: String
-      $bio: String
-      $skills: [String!]
-      $hourlyRate: Float
-      $isAvailable: Boolean
-    ) {
-      updateProfile(
-        name: $name
-        bio: $bio
-        skills: $skills
-        hourlyRate: $hourlyRate
-        isAvailable: $isAvailable
-      ) {
+    mutation UpdateProfile($expertInput: ExpertInput!) {
+      updateProfile(expertInput: $expertInput) {
         success
         error
         expert {
@@ -104,7 +92,7 @@ describe("updateProfile mutation", () => {
 
   it("rejects updateProfile with no auth headers", async () => {
     if (!dbAvailable) return;
-    const res = await gql(app, UPDATE_PROFILE, { name: "New Name" });
+    const res = await gql(app, UPDATE_PROFILE, { expertInput: { name: "New Name" } });
     expect(res.status).toBe(200);
     expect(res.body.data.updateProfile.success).toBe(false);
     expect(res.body.data.updateProfile.error).toMatch(/authentication required/i);
@@ -121,7 +109,7 @@ describe("updateProfile mutation", () => {
       "x-auth-signature": signMessage(otherWallet, "SkillSphere Auth"),
     };
 
-    const res = await gql(app, UPDATE_PROFILE, { name: "Hacker" }, headers);
+    const res = await gql(app, UPDATE_PROFILE, { expertInput: { name: "Hacker" } }, headers);
     expect(res.status).toBe(200);
     expect(res.body.data.updateProfile.success).toBe(false);
     expect(res.body.data.updateProfile.error).toMatch(/authentication required/i);
@@ -132,7 +120,7 @@ describe("updateProfile mutation", () => {
     const wallet = generateTestWallet();
     const headers = buildAuthHeaders(wallet);
 
-    const res = await gql(app, UPDATE_PROFILE, { name: "Ghost" }, headers);
+    const res = await gql(app, UPDATE_PROFILE, { expertInput: { name: "Ghost" } }, headers);
     expect(res.status).toBe(200);
     expect(res.body.data.updateProfile.success).toBe(false);
     expect(res.body.data.updateProfile.error).toMatch(/not found/i);
@@ -159,11 +147,13 @@ describe("updateProfile mutation", () => {
       app,
       UPDATE_PROFILE,
       {
-        name: "Updated Name",
-        bio: "Updated bio",
-        skills: ["TypeScript", "GraphQL", "Node"],
-        hourlyRate: 150,
-        isAvailable: false,
+        expertInput: {
+          name: "Updated Name",
+          bio: "Updated bio",
+          skills: ["TypeScript", "GraphQL", "Node"],
+          hourlyRate: 150,
+          isAvailable: false,
+        },
       },
       headers
     );
@@ -200,7 +190,7 @@ describe("updateProfile mutation", () => {
 
     const headers = buildAuthHeaders(wallet);
 
-    const res = await gql(app, UPDATE_PROFILE, { bio: "New bio only" }, headers);
+    const res = await gql(app, UPDATE_PROFILE, { expertInput: { bio: "New bio only" } }, headers);
     expect(res.status).toBe(200);
     const result = res.body.data.updateProfile;
     expect(result.success).toBe(true);
