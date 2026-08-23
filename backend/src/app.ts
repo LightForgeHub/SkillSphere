@@ -9,13 +9,15 @@ import { resolvers } from "./resolvers";
 import { GraphQLContext } from "./context";
 import { extractAuthFromHeaders, verifyWalletSignature } from "./auth";
 import { createSurgeMultiplierRouter } from "./surgeMultiplier";
+import { makeExecutableSchema } from "@graphql-tools/schema";
+
+export const graphqlSchema = makeExecutableSchema({ typeDefs, resolvers });
 
 export async function createApp(prismaClient: PrismaClient) {
   const app = express();
 
   const server = new ApolloServer<GraphQLContext>({
-    typeDefs,
-    resolvers,
+    schema: graphqlSchema,
   });
 
   await server.start();
@@ -54,5 +56,5 @@ export async function createApp(prismaClient: PrismaClient) {
     })
   );
 
-  return { app, server };
+  return { app, server, schema: graphqlSchema };
 }

@@ -34,6 +34,15 @@ export const typeDefs = gql`
     error: String
   }
 
+  scalar JSON
+
+  type SessionStatusEvent {
+    type: String!
+    sessionId: ID!
+    payload: JSON!
+    timestamp: String!
+  }
+
   type Query {
     """
     Returns a paginated list of experts, optionally filtered by skill.
@@ -62,5 +71,9 @@ export const typeDefs = gql`
     Register as an expert. Requires valid wallet signature in headers.
     """
     registerExpert(name: String!, bio: String, skills: [String!], hourlyRate: Float): UpdateProfileResult!
+  }
+
+  type Subscription {
+    sessionUpdated(sessionId: ID!): SessionStatusEvent!
   }
 `;
