@@ -1,6 +1,7 @@
 import {
   publishSessionStatus,
   onSessionStatus,
+  sessionStatusIterator,
   sessionRoomName,
   SessionStatusMessage,
 } from "../sessionEvents";
@@ -33,5 +34,26 @@ describe("sessionEvents bus", () => {
     off();
     publishSessionStatus("FUNDS_LOW", "sess_1", {});
     expect(received).toHaveLength(1);
+  });
+
+  it("delivers only events for the subscribed session and closes cleanly", async () => {
+    const iterator = sessionStatusIterator("sess_1");
+    const nextEvent = iterator.next();
+
+    publishSessionStatus("SESSION_BOOKED", "sess_other");
+    publishSessionStatus("SESSION_BOOKED", "sess_1", { escrowAmount: "100" });
+
+    await expect(nextEvent).resolves.toMatchObject({
+      done: false,
+      value: {
+        sessionId: "sess_1",
+        payload: { escrowAmount: "100" },
+      },
+    });
+
+    await expect(iterator.return!()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
   });
 });

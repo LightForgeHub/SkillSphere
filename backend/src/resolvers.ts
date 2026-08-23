@@ -1,4 +1,6 @@
 import { GraphQLContext } from "./context";
+import { GraphQLScalarType, Kind } from "graphql";
+import { sessionStatusIterator } from "./sessionEvents";
 
 /** Convert comma-separated skills string to array */
 function parseSkills(skills: string): string[] {
@@ -39,6 +41,16 @@ interface RegisterExpertArgs {
 }
 
 export const resolvers = {
+  JSON: new GraphQLScalarType({
+    name: "JSON",
+    serialize: (value: unknown) => value,
+    parseValue: (value: unknown) => value,
+    parseLiteral: (ast) => {
+      if (ast.kind === Kind.STRING) return JSON.parse(ast.value);
+      return null;
+    },
+  }),
+
   Query: {
     experts: async (
       _: unknown,
@@ -194,6 +206,14 @@ export const resolvers = {
         const msg = err instanceof Error ? err.message : "Unknown error";
         return { success: false, expert: null, error: msg };
       }
+    },
+  },
+
+  Subscription: {
+    sessionUpdated: {
+      subscribe: (_: unknown, { sessionId }: { sessionId: string }) =>
+        sessionStatusIterator(sessionId),
+      resolve: (event: unknown) => event,
     },
   },
 };

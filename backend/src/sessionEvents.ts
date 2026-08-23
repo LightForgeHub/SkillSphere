@@ -62,6 +62,60 @@ export function onSessionStatus(
   };
 }
 
+export function sessionStatusIterator(
+  sessionId: string
+): AsyncIterableIterator<SessionStatusMessage> {
+  const queued: SessionStatusMessage[] = [];
+  let pending: ((result: IteratorResult<SessionStatusMessage>) => void) | undefined;
+  let closed = false;
+
+  const off = onSessionStatus((message) => {
+    if (closed || message.sessionId !== sessionId) return;
+
+    if (pending) {
+      const resolve = pending;
+      pending = undefined;
+      resolve({ value: message, done: false });
+    } else {
+      queued.push(message);
+    }
+  });
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    off();
+    if (pending) {
+      const resolve = pending;
+      pending = undefined;
+      resolve({ value: undefined, done: true });
+    }
+  };
+
+  return {
+    next: () => {
+      if (queued.length > 0) {
+        return Promise.resolve({ value: queued.shift()!, done: false });
+      }
+      if (closed) return Promise.resolve({ value: undefined, done: true });
+      return new Promise<IteratorResult<SessionStatusMessage>>((resolve) => {
+        pending = resolve;
+      });
+    },
+    return: () => {
+      close();
+      return Promise.resolve({ value: undefined, done: true });
+    },
+    throw: (error) => {
+      close();
+      return Promise.reject(error);
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  };
+}
+
 export function sessionRoomName(sessionId: string): string {
   return `session:${sessionId}`;
 }

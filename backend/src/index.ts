@@ -3,12 +3,16 @@ import { createApp } from "./app";
 import { prisma } from "./prisma";
 import { createSessionHub } from "./ws/sessionHub";
 import { publishSessionStatus } from "./sessionEvents";
+import { WebSocketServer } from "ws";
+import { useServer } from "graphql-ws/lib/use/ws";
 
 const PORT = process.env.PORT ?? 4000;
 
 async function main() {
-  const { app } = await createApp(prisma);
+  const { app, schema } = await createApp(prisma);
   const httpServer = createServer(app);
+  const graphqlWs = new WebSocketServer({ server: httpServer, path: "/graphql" });
+  const disposeGraphqlWs = useServer({ schema }, graphqlWs);
   const sessionHub = createSessionHub(httpServer, {
     fallbackSettlement: async (sessionId) => {
       const result = await prisma.session.updateMany({
@@ -33,6 +37,7 @@ async function main() {
   const shutdown = async () => {
     // sessionHub.close() also closes the HTTP server Socket.IO is attached to
     await sessionHub.close();
+    await disposeGraphqlWs.dispose();
     await prisma.$disconnect();
     process.exit(0);
   };
