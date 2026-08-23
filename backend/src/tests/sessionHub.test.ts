@@ -52,10 +52,14 @@ describe("session status WebSocket hub", () => {
   let hub: SessionHub;
   let port: number;
   const clients: ClientSocket[] = [];
+  const fallbackSettlement = jest.fn(async (_sessionId: string) => undefined);
 
   beforeAll(async () => {
     httpServer = createServer();
-    hub = createSessionHub(httpServer);
+    hub = createSessionHub(httpServer, {
+      disconnectGracePeriodMs: 500,
+      fallbackSettlement,
+    });
     await new Promise<void>((resolve) => {
       httpServer.listen(0, "127.0.0.1", () => resolve());
     });
@@ -104,6 +108,60 @@ describe("session status WebSocket hub", () => {
 
     await expect(waitForConnect(socket)).resolves.toBeUndefined();
     expect(socket.connected).toBe(true);
+  });
+
+  it("uses a 10-second heartbeat and settles after a peer disconnect grace period", async () => {
+    const wallet = generateTestWallet();
+    const watcherWallet = generateTestWallet();
+    const sessionId = "sess_disconnect";
+    const socket = connectClient(port, authFor(wallet));
+    const watcher = connectClient(port, authFor(watcherWallet));
+    clients.push(socket, watcher);
+
+    await Promise.all([waitForConnect(socket), waitForConnect(watcher)]);
+    await Promise.all([
+      new Promise((resolve) => socket.emit("subscribe", { sessionId }, resolve)),
+      new Promise((resolve) => watcher.emit("subscribe", { sessionId }, resolve)),
+    ]);
+
+    const disconnected = new Promise<SessionStatusMessage>((resolve) => {
+      watcher.once("session:status", resolve);
+    });
+    socket.close();
+
+    await expect(disconnected).resolves.toMatchObject({
+      type: "PEER_DISCONNECTED",
+      sessionId,
+      payload: { walletAddress: wallet.address },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    expect(fallbackSettlement).toHaveBeenCalledWith(sessionId);
+    expect(hub.io.engine.opts.pingInterval).toBe(10_000);
+  });
+
+  it("cancels the settlement when a disconnected peer reconnects", async () => {
+    fallbackSettlement.mockClear();
+    const wallet = generateTestWallet();
+    const sessionId = "sess_reconnect";
+    const socket = connectClient(port, authFor(wallet));
+    clients.push(socket);
+
+    await waitForConnect(socket);
+    await new Promise((resolve) =>
+      socket.emit("subscribe", { sessionId }, resolve)
+    );
+    socket.close();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const reconnected = connectClient(port, authFor(wallet));
+    clients.push(reconnected);
+    await waitForConnect(reconnected);
+    await new Promise((resolve) =>
+      reconnected.emit("subscribe", { sessionId }, resolve)
+    );
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    expect(fallbackSettlement).not.toHaveBeenCalledWith(sessionId);
   });
 
   it("allows multiple clients to subscribe to the same session channel", async () => {

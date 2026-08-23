@@ -7,6 +7,7 @@ import {
 } from "../auth";
 import {
   onSessionStatus,
+  publishSessionStatus,
   sessionRoomName,
   SessionStatusMessage,
 } from "../sessionEvents";
@@ -23,6 +24,14 @@ export interface SessionHubOptions {
   /** Socket.IO path. Defaults to /session. */
   path?: string;
   corsOrigin?: string | string[] | boolean;
+  /** Engine heartbeat interval in milliseconds. Defaults to 10 seconds. */
+  pingIntervalMs?: number;
+  /** Engine heartbeat timeout in milliseconds. Defaults to 60 seconds. */
+  pingTimeoutMs?: number;
+  /** Time to wait before settling a session after a peer disconnects. */
+  disconnectGracePeriodMs?: number;
+  /** Called after the disconnect grace period expires. */
+  fallbackSettlement?: (sessionId: string) => Promise<void> | void;
 }
 
 interface AuthenticatedSocket extends Socket {
@@ -94,6 +103,8 @@ export function createSessionHub(
 ): SessionHub {
   const io = new Server(httpServer, {
     path: options.path ?? "/session",
+    pingInterval: options.pingIntervalMs ?? 10_000,
+    pingTimeout: options.pingTimeoutMs ?? 60_000,
     cors: {
       origin: options.corsOrigin ?? true,
     },
@@ -101,8 +112,37 @@ export function createSessionHub(
 
   io.use(authenticateConnection);
 
+  const disconnectGracePeriodMs = options.disconnectGracePeriodMs ?? 60_000;
+  const fallbackSettlement =
+    options.fallbackSettlement ?? ((sessionId: string) => {
+      publishSessionStatus("SESSION_ENDED", sessionId, {
+        reason: "peer_disconnect_timeout",
+      });
+    });
+  const settlementTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const cancelSettlement = (sessionId: string): void => {
+    const timer = settlementTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      settlementTimers.delete(sessionId);
+    }
+  };
+
+  const scheduleSettlement = (sessionId: string): void => {
+    cancelSettlement(sessionId);
+    const timer = setTimeout(() => {
+      settlementTimers.delete(sessionId);
+      void Promise.resolve(fallbackSettlement(sessionId)).catch((error: unknown) => {
+        console.error(`[SessionHub] fallback settlement failed for ${sessionId}:`, error);
+      });
+    }, disconnectGracePeriodMs);
+    settlementTimers.set(sessionId, timer);
+  };
+
   io.on("connection", (socket: Socket) => {
     const authed = socket as AuthenticatedSocket;
+    const subscribedSessions = new Set<string>();
 
     socket.on("subscribe", (data: unknown, ack?: (response: unknown) => void) => {
       const sessionId = parseSessionId(data);
@@ -113,6 +153,8 @@ export function createSessionHub(
       }
 
       const room = sessionRoomName(sessionId);
+      subscribedSessions.add(sessionId);
+      cancelSettlement(sessionId);
       void socket.join(room);
       ack?.({
         ok: true,
@@ -130,11 +172,20 @@ export function createSessionHub(
       }
 
       const room = sessionRoomName(sessionId);
+      subscribedSessions.delete(sessionId);
       void socket.leave(room);
       ack?.({ ok: true, room });
     });
 
-    // Socket.IO removes the socket from all rooms on disconnect automatically.
+    socket.on("disconnect", (reason: string) => {
+      for (const sessionId of subscribedSessions) {
+        publishSessionStatus("PEER_DISCONNECTED", sessionId, {
+          walletAddress: authed.data.walletAddress,
+          reason,
+        });
+        scheduleSettlement(sessionId);
+      }
+    });
   });
 
   const unsubscribeBus = onSessionStatus((message: SessionStatusMessage) => {
@@ -148,6 +199,8 @@ export function createSessionHub(
       return sockets.length;
     },
     close: async () => {
+      for (const timer of settlementTimers.values()) clearTimeout(timer);
+      settlementTimers.clear();
       unsubscribeBus();
       await new Promise<void>((resolve) => {
         io.close(() => resolve());
