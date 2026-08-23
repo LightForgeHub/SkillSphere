@@ -179,7 +179,7 @@ model Transaction {
 model EventLog {
   id          String    @id @default(cuid())
   txHash      String    @unique
-  /// e.g. "SESSION_BOOKED", "SESSION_COMPLETED", "PAYMENT_RELEASED"
+  /// e.g. "SESSION_BOOKED", "PAYMENT_STREAMED", "PAYMENT_RELEASED"
   eventType   String
   /// JSON-encoded event payload
   payload     String
@@ -198,6 +198,8 @@ model EventLog {
 model IndexerState {
   key        String   @id
   lastLedger Int      @default(0)
+  /// Opaque getEvents cursor for pagination (mutually exclusive with startLedger)
+  lastCursor String?
   updatedAt  DateTime @updatedAt
 }
 

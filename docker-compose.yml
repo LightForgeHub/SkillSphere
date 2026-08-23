@@ -54,7 +54,9 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://skillsphere:skillsphere@db:5432/skillsphere?schema=public
-      INDEXER_INTERVAL_MS: "5000"
+      INDEXER_INTERVAL_MS: "1000"
+      SOROBAN_RPC_URL: "https://soroban-testnet.stellar.org"
+      ESCROW_CONTRACT_ID: ${ESCROW_CONTRACT_ID:-}
     depends_on:
       db:
         condition: service_healthy
