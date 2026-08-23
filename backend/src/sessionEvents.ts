@@ -13,7 +13,8 @@ export type SessionStatusEventType =
   | "SESSION_ENDED"
   | "PAYMENT_RELEASED"
   | "FUNDS_UPDATED"
-  | "FUNDS_LOW";
+  | "FUNDS_LOW"
+  | "PEER_DISCONNECTED";
 
 export interface SessionStatusMessage {
   type: SessionStatusEventType;
