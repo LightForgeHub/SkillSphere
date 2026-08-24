@@ -417,6 +417,69 @@ describe("processEvents", () => {
     expect(result.errors[0]).toMatch(/missing amount/i);
   });
 
+  it("processes PAYMENT_STREAMED into a transaction and keeps session ACTIVE", async () => {
+    if (!dbAvailable) return;
+
+    const seeker = "GSEEKER_STREAM_EVT";
+    const expertWallet = "GEXPERT_STREAM_EVT";
+    await db.prisma.user.create({ data: { walletAddress: seeker } });
+    const expertUser = await db.prisma.user.create({
+      data: { walletAddress: expertWallet },
+    });
+    const expert = await db.prisma.expert.create({
+      data: { userId: expertUser.id, name: "Stream Event Expert" },
+    });
+    await db.prisma.session.create({
+      data: {
+        sessionId: "sess_stream_evt",
+        seekerAddress: seeker,
+        expertAddress: expertWallet,
+        expertId: expert.id,
+        status: "ACTIVE",
+        escrowAmount: 500n,
+      },
+    });
+
+    await ingestEvent(db.prisma, {
+      txHash: "tx_stream_evt_001",
+      eventType: "PAYMENT_STREAMED",
+      payload: {
+        sessionId: "sess_stream_evt",
+        amount: "75",
+        ledgerClosedAt: "2026-08-22T12:00:00.000Z",
+      },
+    });
+
+    const result = await processEvents(db.prisma);
+    expect(result.processed).toBe(1);
+    expect(result.errors).toHaveLength(0);
+
+    const session = await db.prisma.session.findUnique({
+      where: { sessionId: "sess_stream_evt" },
+    });
+    expect(session?.status).toBe("ACTIVE");
+
+    const tx = await db.prisma.transaction.findUnique({
+      where: { txHash: "tx_stream_evt_001" },
+    });
+    expect(tx?.type).toBe("PAYMENT_RELEASED");
+    expect(tx?.amount.toString()).toBe("75");
+    expect(tx?.ledgerTime.toISOString()).toBe("2026-08-22T12:00:00.000Z");
+  });
+
+  it("skips PAYMENT_STREAMED event with missing sessionId", async () => {
+    if (!dbAvailable) return;
+    await ingestEvent(db.prisma, {
+      txHash: "tx_stream_no_session",
+      eventType: "PAYMENT_STREAMED",
+      payload: { amount: 10 },
+    });
+
+    const result = await processEvents(db.prisma);
+    expect(result.skipped).toBe(1);
+    expect(result.errors[0]).toMatch(/missing sessionId/i);
+  });
+
   it("notifies Discord/Telegram when a new SESSION_BOOKED session is created", async () => {
     if (!dbAvailable) return;
 

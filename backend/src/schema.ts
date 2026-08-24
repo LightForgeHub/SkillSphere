@@ -102,6 +102,13 @@ export const typeDefs = gql`
     sessionId: String!
     rating: Int!
     content: String!
+  scalar JSON
+
+  type SessionStatusEvent {
+    type: String!
+    sessionId: ID!
+    payload: JSON!
+    timestamp: String!
   }
 
   type Query {
@@ -146,5 +153,9 @@ export const typeDefs = gql`
       skills: [String!]
       hourlyRate: Float
     ): UpdateProfileResult!
+  }
+
+  type Subscription {
+    sessionUpdated(sessionId: ID!): SessionStatusEvent!
   }
 `;

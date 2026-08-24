@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { getNotificationService } from "./notificationService";
 import {
   publishSessionStatus,
@@ -9,6 +9,7 @@ export type StellarEventType =
   | "SESSION_BOOKED"
   | "SESSION_COMPLETED"
   | "PAYMENT_RELEASED"
+  | "PAYMENT_STREAMED"
   | "EXPERT_REGISTERED"
   | "SESSION_PAUSED"
   | "SESSION_REFUNDED";
@@ -18,6 +19,7 @@ const SESSION_SCOPED_EVENTS: ReadonlySet<StellarEventType> = new Set([
   "SESSION_BOOKED",
   "SESSION_COMPLETED",
   "PAYMENT_RELEASED",
+  "PAYMENT_STREAMED",
   "SESSION_PAUSED",
   "SESSION_REFUNDED",
 ]);
@@ -50,16 +52,30 @@ export async function ingestEvent(
     return { created: false, id: existing.id };
   }
 
-  const created = await prisma.eventLog.create({
-    data: {
-      txHash: event.txHash,
-      eventType: event.eventType,
-      payload: JSON.stringify(event.payload),
-      processed: false,
-    },
-  });
-
-  return { created: true, id: created.id };
+  try {
+    const created = await prisma.eventLog.create({
+      data: {
+        txHash: event.txHash,
+        eventType: event.eventType,
+        payload: JSON.stringify(event.payload),
+        processed: false,
+      },
+    });
+    return { created: true, id: created.id };
+  } catch (err) {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2002"
+    ) {
+      const raced = await prisma.eventLog.findUnique({
+        where: { txHash: event.txHash },
+      });
+      if (raced) {
+        return { created: false, id: raced.id };
+      }
+    }
+    throw err;
+  }
 }
 
 /**
@@ -130,6 +146,9 @@ async function handleEvent(
       break;
     case "PAYMENT_RELEASED":
       await handlePaymentReleased(prisma, payload, txHash);
+      break;
+    case "PAYMENT_STREAMED":
+      await handlePaymentStreamed(prisma, payload, txHash);
       break;
     case "SESSION_PAUSED":
       await handleSessionPaused(prisma, payload);
@@ -249,9 +268,8 @@ async function handleSessionBooked(
     });
   }
 
-  const hash = txHash ?? (payload["txHash"] as string);
+  const hash = transactionHash(payload, txHash);
   if (hash) {
-    const ledgerTime = payload["ledgerTime"] ? new Date(payload["ledgerTime"] as string) : new Date();
     await prisma.transaction.upsert({
       where: { txHash: hash },
       create: {
@@ -259,7 +277,7 @@ async function handleSessionBooked(
         sessionId,
         amount: escrowAmount,
         type: "ESCROW_FUNDED",
-        ledgerTime,
+        ledgerTime: ledgerTimeFromPayload(payload),
       },
       update: {},
     });
@@ -279,11 +297,10 @@ async function handleSessionCompleted(
     data: { status: "COMPLETED", endTime: new Date() },
   });
 
-  const hash = txHash ?? (payload["txHash"] as string);
+  const hash = transactionHash(payload, txHash);
   const amountStr = payload["amount"] ?? payload["escrowAmount"];
   if (hash && amountStr !== undefined) {
     const amount = BigInt(String(amountStr));
-    const ledgerTime = payload["ledgerTime"] ? new Date(payload["ledgerTime"] as string) : new Date();
     await prisma.transaction.upsert({
       where: { txHash: hash },
       create: {
@@ -291,7 +308,7 @@ async function handleSessionCompleted(
         sessionId,
         amount,
         type: "PAYMENT_RELEASED",
-        ledgerTime,
+        ledgerTime: ledgerTimeFromPayload(payload),
       },
       update: {},
     });
@@ -317,9 +334,8 @@ async function handlePaymentReleased(
     });
   }
 
-  const hash = txHash ?? (payload["txHash"] as string);
+  const hash = transactionHash(payload, txHash);
   if (hash && sessionId) {
-    const ledgerTime = payload["ledgerTime"] ? new Date(payload["ledgerTime"] as string) : new Date();
     await prisma.transaction.upsert({
       where: { txHash: hash },
       create: {
@@ -327,11 +343,56 @@ async function handlePaymentReleased(
         sessionId,
         amount,
         type: "PAYMENT_RELEASED",
-        ledgerTime,
+        ledgerTime: ledgerTimeFromPayload(payload),
       },
       update: {},
     });
   }
+}
+
+/**
+ * Incremental expert earnings during an active session (on-chain PaymentStreamed).
+ * Records a PAYMENT_RELEASED transaction without completing the session.
+ */
+async function handlePaymentStreamed(
+  prisma: PrismaClient,
+  payload: Record<string, unknown>,
+  txHash?: string
+): Promise<void> {
+  if (!payload["sessionId"]) throw new Error("PAYMENT_STREAMED: missing sessionId");
+  if (payload["amount"] === undefined || payload["amount"] === null) {
+    throw new Error("PAYMENT_STREAMED: missing amount");
+  }
+
+  const sessionId = String(payload["sessionId"]);
+  const amount = BigInt(String(payload["amount"]));
+
+  const session = await prisma.session.findUnique({
+    where: { sessionId },
+  });
+  if (!session) {
+    throw new Error(`PAYMENT_STREAMED: session not found: ${sessionId}`);
+  }
+
+  const hash = transactionHash(payload, txHash);
+  if (!hash) {
+    throw new Error("PAYMENT_STREAMED: missing txHash");
+  }
+
+  await prisma.transaction.upsert({
+    where: { txHash: hash },
+    create: {
+      txHash: hash,
+      sessionId,
+      amount,
+      type: "PAYMENT_RELEASED",
+      ledgerTime: ledgerTimeFromPayload(payload),
+    },
+    update: {
+      amount,
+      ledgerTime: ledgerTimeFromPayload(payload),
+    },
+  });
 }
 
 async function handleSessionPaused(
@@ -360,11 +421,10 @@ async function handleSessionRefunded(
     data: { status: "REFUNDED" },
   });
 
-  const hash = txHash ?? (payload["txHash"] as string);
+  const hash = transactionHash(payload, txHash);
   const amountStr = payload["amount"] ?? payload["escrowAmount"];
   if (hash && amountStr !== undefined) {
     const amount = BigInt(String(amountStr));
-    const ledgerTime = payload["ledgerTime"] ? new Date(payload["ledgerTime"] as string) : new Date();
     await prisma.transaction.upsert({
       where: { txHash: hash },
       create: {
@@ -372,11 +432,33 @@ async function handleSessionRefunded(
         sessionId,
         amount,
         type: "REFUND_ISSUED",
-        ledgerTime,
+        ledgerTime: ledgerTimeFromPayload(payload),
       },
       update: {},
     });
   }
+}
+
+function transactionHash(
+  payload: Record<string, unknown>,
+  txHash?: string
+): string | undefined {
+  if (typeof payload["txHash"] === "string" && payload["txHash"]) {
+    return payload["txHash"];
+  }
+  if (typeof txHash === "string" && txHash) {
+    return txHash;
+  }
+  return undefined;
+}
+
+function ledgerTimeFromPayload(payload: Record<string, unknown>): Date {
+  const raw = payload["ledgerClosedAt"] ?? payload["ledgerTime"];
+  if (typeof raw === "string" && raw) {
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
 }
 
 /**
@@ -395,6 +477,8 @@ function maybeBroadcastSessionStatus(
   let wsType: SessionStatusEventType = eventType as SessionStatusEventType;
   if (eventType === "SESSION_REFUNDED") {
     wsType = "SESSION_ENDED";
+  } else if (eventType === "PAYMENT_STREAMED") {
+    wsType = "PAYMENT_RELEASED";
   }
 
   publishSessionStatus(

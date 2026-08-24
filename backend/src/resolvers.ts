@@ -1,5 +1,7 @@
 import { GraphQLError } from "graphql";
 import { GraphQLContext } from "./context";
+import { GraphQLScalarType, Kind } from "graphql";
+import { sessionStatusIterator } from "./sessionEvents";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -156,6 +158,16 @@ export const resolvers = {
   // -------------------------------------------------------------------------
   // Query Resolvers
   // -------------------------------------------------------------------------
+  JSON: new GraphQLScalarType({
+    name: "JSON",
+    serialize: (value: unknown) => value,
+    parseValue: (value: unknown) => value,
+    parseLiteral: (ast) => {
+      if (ast.kind === Kind.STRING) return JSON.parse(ast.value);
+      return null;
+    },
+  }),
+
   Query: {
     /**
      * experts(category, search, limit, offset)
@@ -553,6 +565,14 @@ export const resolvers = {
         });
       }
       return serializeSession(session);
+    },
+  },
+
+  Subscription: {
+    sessionUpdated: {
+      subscribe: (_: unknown, { sessionId }: { sessionId: string }) =>
+        sessionStatusIterator(sessionId),
+      resolve: (event: unknown) => event,
     },
   },
 };

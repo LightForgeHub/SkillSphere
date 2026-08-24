@@ -2,27 +2,37 @@ import { prisma } from "./prisma";
 import { processEvents } from "./eventListener";
 import { SorobanIndexerService } from "./sorobanIndexer";
 
-const INTERVAL_MS = Number(process.env.INDEXER_INTERVAL_MS ?? 5000);
+const DEFAULT_INTERVAL_MS = 1000;
+const MIN_INTERVAL_MS = 100;
+
+function resolveIntervalMs(raw: string | undefined): number {
+  const parsed = Number(raw ?? DEFAULT_INTERVAL_MS);
+  if (!Number.isFinite(parsed) || parsed < MIN_INTERVAL_MS) {
+    return DEFAULT_INTERVAL_MS;
+  }
+  return Math.floor(parsed);
+}
+
+const INTERVAL_MS = resolveIntervalMs(process.env.INDEXER_INTERVAL_MS);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const sorobanIndexer = new SorobanIndexerService(prisma);
 
 async function tick(): Promise<void> {
-  // Poll Stellar / Soroban RPC endpoint for contract events
   const sorobanRes = await sorobanIndexer.pollOnce();
-
-  // Process any pending / unhandled event logs
+  // Catch events ingested if processEvents inside pollOnce was interrupted.
   const result = await processEvents(prisma);
+  const processed = sorobanRes.processedCount + result.processed;
 
   if (
     sorobanRes.eventsFetched > 0 ||
-    result.processed > 0 ||
+    processed > 0 ||
     result.skipped > 0 ||
     result.errors.length > 0
   ) {
     console.log(
-      `[indexer] sorobanEvents=${sorobanRes.eventsFetched} processed=${result.processed} skipped=${result.skipped} errors=${result.errors.length} latestLedger=${sorobanRes.latestLedger}`
+      `[indexer] sorobanEvents=${sorobanRes.eventsFetched} processed=${processed} skipped=${result.skipped} errors=${result.errors.length} latestLedger=${sorobanRes.latestLedger}`
     );
 
     for (const error of result.errors) {
@@ -32,11 +42,8 @@ async function tick(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  console.log(
-    `SkillSphere indexer running (interval=${INTERVAL_MS}ms)`
-  );
+  console.log(`SkillSphere indexer running (interval=${INTERVAL_MS}ms)`);
 
-  // Verify DB connectivity before entering the poll loop
   await prisma.$connect();
   console.log("[indexer] connected to database");
 

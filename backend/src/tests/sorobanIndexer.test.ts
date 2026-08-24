@@ -3,6 +3,8 @@ import {
   parseScVal,
   toPlainObject,
   decodeEventPayload,
+  classifyEventType,
+  buildContractEventFilters,
   getLastProcessedLedger,
   saveLastProcessedLedger,
   SorobanIndexerService,
@@ -74,6 +76,48 @@ describe("sorobanIndexer — XDR & Payload Decoding (Pure Unit Tests)", () => {
 
     expect(result).toBeDefined();
     expect(result.eventType).toBeNull();
+  });
+
+  it("decodes PaymentStreamed topics and data without classifying as completion", () => {
+    const value = {
+      session_id: "sess-stream-1",
+      amount: "12345",
+      expert_address: "GEXPERT_STREAM",
+    };
+    const { eventType, payload } = decodeEventPayload(["PaymentStreamed"], value);
+
+    expect(eventType).toBe("PAYMENT_STREAMED");
+    expect(classifyEventType("payment")).toBeNull();
+    expect(payload["sessionId"]).toBe("sess-stream-1");
+    expect(payload["amount"]).toBe("12345");
+    expect(payload["expertAddress"]).toBe("GEXPERT_STREAM");
+  });
+
+  it("reads sessionId from the second topic when the value map omits it", () => {
+    const { eventType, payload } = decodeEventPayload(
+      ["PaymentStreamed", "sess-from-topic"],
+      { amount: 50 }
+    );
+
+    expect(eventType).toBe("PAYMENT_STREAMED");
+    expect(payload["sessionId"]).toBe("sess-from-topic");
+    expect(payload["amount"]).toBe(50);
+  });
+
+  it("classifies only exact topic names, not substrings", () => {
+    expect(classifyEventType("PaymentStreamed")).toBe("PAYMENT_STREAMED");
+    expect(classifyEventType("fund_session")).toBe("SESSION_BOOKED");
+    expect(classifyEventType("booked")).toBe("SESSION_BOOKED");
+    expect(classifyEventType("payment")).toBeNull();
+    expect(classifyEventType("unbooked")).toBeNull();
+    expect(classifyEventType("complete_session_v2")).toBeNull();
+  });
+
+  it("builds getEvents filters scoped to contract IDs (max 5 per filter)", () => {
+    const filters = buildContractEventFilters(["C1", "C2"]);
+    expect(filters).toEqual([
+      { type: "contract", contractIds: ["C1", "C2"] },
+    ]);
   });
 });
 
@@ -182,6 +226,18 @@ describe("sorobanIndexer — Database & Service Logic", () => {
     expect(tx).not.toBeNull();
     expect(tx?.type).toBe("ESCROW_FUNDED");
 
+    expect(mockServer.getEvents).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startLedger: 100,
+        filters: [
+          expect.objectContaining({
+            type: "contract",
+            contractIds: ["CCONTRACT123"],
+          }),
+        ],
+      })
+    );
+
     const lastLedger = await getLastProcessedLedger(db.prisma);
     expect(lastLedger).toBe(100);
   });
@@ -259,5 +315,113 @@ describe("sorobanIndexer — Database & Service Logic", () => {
       where: { txHash: "tx_complete_999" },
     });
     expect(tx?.type).toBe("PAYMENT_RELEASED");
+  });
+
+  it("indexes PaymentStreamed into Transaction without completing the session", async () => {
+    if (!dbAvailable) return;
+
+    await db.prisma.user.create({ data: { walletAddress: "GSEEKER_STREAM" } });
+    const expUser = await db.prisma.user.create({
+      data: { walletAddress: "GEXPERT_STREAM" },
+    });
+    const exp = await db.prisma.expert.create({
+      data: { id: "exp_stream", userId: expUser.id, name: "Stream Expert" },
+    });
+    await db.prisma.session.create({
+      data: {
+        sessionId: "sess-stream-live",
+        seekerAddress: "GSEEKER_STREAM",
+        expertAddress: "GEXPERT_STREAM",
+        expertId: exp.id,
+        status: "ACTIVE",
+        escrowAmount: 1_000_000n,
+      },
+    });
+
+    const ledgerClosedAt = "2026-08-22T18:00:00.000Z";
+    const mockEvents = [
+      {
+        id: "0000003000-0000000001",
+        ledger: 300,
+        ledgerClosedAt,
+        contractId: "CESCROW",
+        topic: ["PaymentStreamed", "sess-stream-live"],
+        value: { amount: "250000" },
+        txHash: "tx_payment_streamed_001",
+      },
+    ];
+
+    const mockServer = {
+      getLatestLedger: jest.fn().mockResolvedValue({ sequence: 305 }),
+      getEvents: jest.fn().mockResolvedValue({
+        events: mockEvents,
+        cursor: "cursor-300",
+        latestLedger: 305,
+      }),
+    } as unknown as any;
+
+    const service = new SorobanIndexerService(db.prisma, {
+      server: mockServer,
+      contractIds: ["CESCROW"],
+    });
+
+    await saveLastProcessedLedger(db.prisma, 299);
+
+    const started = Date.now();
+    const pollRes = await service.pollOnce();
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeLessThan(2000);
+    expect(pollRes.eventsFetched).toBe(1);
+    expect(pollRes.processedCount).toBe(1);
+
+    const session = await db.prisma.session.findUnique({
+      where: { sessionId: "sess-stream-live" },
+    });
+    expect(session?.status).toBe("ACTIVE");
+
+    const tx = await db.prisma.transaction.findUnique({
+      where: { txHash: "tx_payment_streamed_001" },
+    });
+    expect(tx).not.toBeNull();
+    expect(tx?.type).toBe("PAYMENT_RELEASED");
+    expect(tx?.amount.toString()).toBe("250000");
+    expect(tx?.sessionId).toBe("sess-stream-live");
+    expect(tx?.ledgerTime.toISOString()).toBe(ledgerClosedAt);
+
+    expect(mockServer.getEvents).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filters: [
+          expect.objectContaining({
+            type: "contract",
+            contractIds: ["CESCROW"],
+          }),
+        ],
+      })
+    );
+
+    const state = await db.prisma.indexerState.findUnique({
+      where: { key: "stellar_soroban_indexer" },
+    });
+    expect(state?.lastCursor).toBe("cursor-300");
+  });
+
+  it("resumes getEvents from the saved cursor instead of startLedger", async () => {
+    if (!dbAvailable) return;
+    await saveLastProcessedLedger(db.prisma, 400, "stellar_soroban_indexer", "cursor-400");
+
+    const getEvents = jest.fn().mockResolvedValue({ events: [], cursor: "cursor-400" });
+    const mockServer = {
+      getLatestLedger: jest.fn().mockResolvedValue({ sequence: 410 }),
+      getEvents,
+    } as unknown as any;
+
+    const service = new SorobanIndexerService(db.prisma, { server: mockServer });
+    await service.pollOnce();
+
+    expect(getEvents).toHaveBeenCalledWith(
+      expect.objectContaining({ cursor: "cursor-400", limit: 100 })
+    );
+    expect(getEvents.mock.calls[0][0].startLedger).toBeUndefined();
   });
 });
