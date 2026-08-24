@@ -1,4 +1,5 @@
 import { ApolloServer } from "@apollo/server";
+import { GraphQLFormattedError } from "graphql";
 import { expressMiddleware } from "@apollo/server/express4";
 import express from "express";
 import cors from "cors";
@@ -17,6 +18,43 @@ export async function createApp(prismaClient: PrismaClient) {
   const app = express();
 
   const server = new ApolloServer<GraphQLContext>({
+    typeDefs,
+    resolvers,
+    formatError: (formattedError: GraphQLFormattedError, error: unknown) => {
+      // Log the original error for debugging internally
+      console.error("[GraphQL Error]", error);
+
+      // For known user-facing errors (validation, auth, not-found), pass through as-is
+      const code = formattedError.extensions?.code as string | undefined;
+      if (
+        code === "BAD_USER_INPUT" ||
+        code === "UNAUTHENTICATED" ||
+        code === "FORBIDDEN" ||
+        code === "NOT_FOUND"
+      ) {
+        return formattedError;
+      }
+
+      // Sanitize unexpected internal errors
+      if (formattedError.message.startsWith("Variable") || formattedError.message.startsWith("Cannot")) {
+        return formattedError;
+      }
+
+      // For all other unhandled errors, return a generic safe message
+      const isInternalError =
+        !code || code === "INTERNAL_SERVER_ERROR";
+
+      if (isInternalError) {
+        return {
+          message: "An internal server error occurred. Please try again later.",
+          extensions: {
+            code: "INTERNAL_SERVER_ERROR",
+          },
+        };
+      }
+
+      return formattedError;
+    },
     schema: graphqlSchema,
   });
 
